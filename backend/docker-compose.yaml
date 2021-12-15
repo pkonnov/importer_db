@@ -1,0 +1,51 @@
+version: '3.3'
+services:
+  to_db:
+    container_name: to_db
+    image: mysql:8.0
+    restart: always
+    environment:
+      MYSQL_DATABASE: 'test'
+      MYSQL_USER: 'user'
+      MYSQL_PASSWORD: 'password'
+      MYSQL_ROOT_PASSWORD: 'password'
+    ports:
+      - '3306:3306'
+    expose:
+      - '3306'
+    volumes:
+      - to_db:/var/lib/mysql
+
+  from_db:
+    container_name: from_db
+    image: mysql:8.0
+    restart: always
+    environment:
+      MYSQL_DATABASE: 'test'
+      MYSQL_USER: 'user'
+      MYSQL_PASSWORD: 'password'
+      MYSQL_ROOT_PASSWORD: 'password'
+    ports:
+      - '3307:3306'
+    expose:
+      - '3307'
+    volumes:
+      - from_db:/var/lib/mysql
+      - ./t_ylt.sql:/docker-entrypoint-initdb.d/dump.sql
+
+  mongodb:
+    image: mongo
+    container_name: mongodb
+    environment:
+      - PUID=1000
+      - PGID=1000
+    volumes:
+      - storage:/data/db
+    ports:
+      - 27017:27017
+    restart: unless-stopped
+
+volumes:
+  to_db:
+  from_db:
+  storage:
