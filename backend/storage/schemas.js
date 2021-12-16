@@ -8,13 +8,21 @@ const Schema = mongoose.Schema;
 const StagesImportSchema = new Schema({
     status: {
         type: String,
-        enum: ['run_create_tables', 'finished_create_tables', 'run_create_rows', 'finished_create_rows'],
+        enum: ['run_create_tables', 'tables_created', 'run_create_rows', 'finished', 'error'],
         default: 'run_create_tables'
     },
     hash: String,
+    tablesSuchNeedCreated: Array,
     createdTables: Array,
+    lastSuccessRow: String,
     errorTables: Array,
-    errorRow: Array
+    errorRow: Array,
+    lastError: String,
 });
+
+StagesImportSchema.methods.nextStatus = function nextStatus(status) {
+    this.status = status
+    this.save()
+}
 
 export const StagesImport = mongoose.model('StagesImport', StagesImportSchema );

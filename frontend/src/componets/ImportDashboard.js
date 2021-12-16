@@ -30,7 +30,9 @@ export default function ImportDashboard() {
     const runImport = async (data) => {
         const prepareData = getPrepareData(data)
         setLoading(true)
+        console.log(prepareData)
         const res = await Service("post", "/mysql/run-sync", prepareData)
+        console.log(res)
         setLoading(false)
     }
 
