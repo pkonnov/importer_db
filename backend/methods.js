@@ -17,7 +17,8 @@ export const runSyncHandler = async (req, res) => {
       try {
          const data = JSON.parse(chunk)
          const hash = getHash(data)
-         const initImportState = new ImportState(data.fromDb, data.toDb, hash)
+         const runWithLastError = data.runWithLastError
+         const initImportState = new ImportState(data.fromDb, data.toDb, hash, runWithLastError)
          const result = await initImportState.runSync()
          await res.writeHead(200, {"Content-Type": "application/json"})
          await res.end(JSON.stringify({

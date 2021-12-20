@@ -9,11 +9,17 @@ class ImportState {
     connFromDb = null
     connToDb = null
 
-    constructor(fromDb, toDb, hash) {
+    constructor(fromDb, toDb, hash, runWithLastError) {
         this.fromDb = fromDb
         this.toDb = toDb
         this.hash = hash
+        this.runWithLastError = runWithLastError
         this.stage = null
+        this.stages = {
+           ...stages
+        }
+        this.stages[stages.RUN_CREATE_TABLES] = this.createTables
+        this.stages[stages.RUN_CREATE_ROWS] = this.createRows
     }
 
     async createConnFrom() {
@@ -36,7 +42,11 @@ class ImportState {
         await this.createConnFrom()
         await this.createConnTo()
         try {
-            const stage = await StagesImport.findOne({hash: this.hash}).exec()
+            let stage = null
+            if (this.runWithLastError) {
+                stage = await StagesImport.find({hash: this.hash, status: stages.ERROR}).sort({"createdAt": 1}).exec()
+                stage = stage[0]
+            }
 
             if (!stage) {
                 const doc = new StagesImport({hash: this.hash})
@@ -50,50 +60,57 @@ class ImportState {
                 // throw
 
             const listTablesFromDb = await this.getListTables(this.connFromDb, this.fromDb.database)
-            if (!listTablesFromDb.length) {
-                // throw new ConflictError(errors.ExportDatabaseEmpty)
-            }
-
             const listTablesToDb = await this.getListTables(this.connToDb, this.toDb.database)
-            if (!listTablesToDb.length) {
-                // throw new ConflictError(errors.ImportDatabaseEmpty)
+
+            if (!stage) {
+                if (!listTablesFromDb.length) {
+                    // throw new ConflictError(errors.ExportDatabaseEmpty)
+                }
+
+                if (!listTablesToDb.length) {
+                    // throw new ConflictError(errors.ImportDatabaseEmpty)
+                }
+
+                const tablesDescribeFromDb = await this.getTablesDescribe(listTablesFromDb, this.connFromDb)
+                const tablesDescribeToDb = await this.getTablesDescribe(listTablesToDb, this.connToDb)
+                const diff = await this.getDiffTables(tablesDescribeFromDb, tablesDescribeToDb)
+
+                if (diff) {
+                    // throw new ConflictError(errors.ExcellentTableStruct)
+                }
             }
-
-            const tablesDescribeFromDb = await this.getTablesDescribe(listTablesFromDb, this.connFromDb)
-            const tablesDescribeToDb = await this.getTablesDescribe(listTablesToDb, this.connToDb)
-            const diff = await this.getDiffTables(tablesDescribeFromDb, tablesDescribeToDb)
-
-            if (diff) {
-                // throw new ConflictError(errors.ExcellentTableStruct)
-            }
-
+            // not work
             await this.createTables(listTablesFromDb, listTablesToDb)
             await this.createRows()
-
         } catch (err) {
             console.log(err)
         }
     }
 
     async createTables(listTablesFromDb, listTablesToDb) {
-        const tablesSuchNeedCreate = SetOperation.difference(listTablesFromDb, listTablesToDb)
-        this.stage.tablesSuchNeedCreated.push(...tablesSuchNeedCreate)
-
+        let tablesSuchNeedCreate = null
+        if (!this.runWithLastError) {
+            tablesSuchNeedCreate = SetOperation.difference(listTablesFromDb, listTablesToDb)
+            this.stage.tablesSuchNeedCreated.push(...tablesSuchNeedCreate)
+        }
         console.log(`start create tables: ${tablesSuchNeedCreate}`)
-        if (tablesSuchNeedCreate) {
-            const statements = await this.getTableStatements(tablesSuchNeedCreate, this.connFromDb)
+        if (tablesSuchNeedCreate || this.stage.tablesSuchNeedCreated) {
+            const statements = await this.getTableStatements(
+                tablesSuchNeedCreate || this.stage.tablesSuchNeedCreated, this.connFromDb)
             statements.forEach((value, key, map) => {
                 this.connToDb.query(value).then(async (res) => {
                     this.stage.createdTables.push(key)
+                    this.stage.tablesSuchNeedCreated.shift()
                     await this.saveStage()
                 }).catch(async err => {
                     this.stage.errorTables.push(key)
                     this.stage.lastError = err
+                    this.stage.status = stages.CREATE_TABLES_ERROR
                     await this.saveStage()
                 })
             })
         }
-        this.stage.nextStatus(stages.TABLES_CREATED)
+        await this.runStage(stages.RUN_CREATE_ROWS)
     }
 
     async getTableStatements(listTableNames, conn) {
@@ -134,45 +151,63 @@ class ImportState {
     }
 
     async createRows() {
-        this.stage.nextStatus(stages.RUN_CREATE_ROWS)
-        const tables = this.stage.tablesSuchNeedCreated
-        for (let i = 0; i < tables.length; i++) {
-            const qCountRows = await this.connFromDb.query(`select count(*) from ${tables[i]};`)
+        await this.stage.nextStatus(stages.RUN_CREATE_ROWS)
+        console.log('run create rows')
+        for (const table of this.stage.createdTables) {
+            console.log(`run create rows to ${table}`)
+            const qCountRows = await this.connFromDb.query(`select count(*) from ${table};`)
             const countRows = qCountRows[0][0]["count(*)"]
-            for (let j = 0; j < countRows; j += 1000) {
+            const lastSuccessRow = this.stage.lastSuccessRow
+            for (let j = lastSuccessRow ? lastSuccessRow: 0; j < countRows; j += 1000) {
                 try {
-                    await this.connFromDb.beginTransaction()
+                    const resRows = await this.connFromDb.query(`select * from ${table} limit 1000 offset ${j}`)
+                    const rows = resRows[0]
+                    await this.connToDb.beginTransaction()
                     const queries = []
-                    const res_rows = await this.connFromDb.query(`select * from ${tables[i]} limit 1000 offset ${j}`)
-                    const rows = res_rows[0]
                     rows.forEach((value) => {
-                        queries.push(this.connToDb.query(this.getInsertQuery(tables[i], value)))
+                        queries.push(this.connToDb.query(this.getInsertQuery(table, value)))
                     })
                     await Promise.all(queries)
-                    await this.connFromDb.commit()
+                    await this.connToDb.commit()
                     const lenRows = rows.length
+                    console.log(`created count rows ${lenRows}`)
                     if (lenRows < 1000) {
-                        await this.connFromDb.end()
-                        this.stage.nextStatus(stages.FINISH)
-                        break
+                        this.stage.lastSuccessRow = 0
+                        this.stage.status = stages.FINISH
+                        this.stage.createdTables.shift()
+                        await this.saveStage()
+                        console.log(`created rows end`)
                     }
                 } catch (err) {
-                    await this.connFromDb.rollback()
-                    await this.connFromDb.end()
-                    this.stage.nextStatus(stages.ERROR)
+                    console.log(err)
+                    await this.connToDb.rollback()
+                    await this.connToDb.end()
+                    this.stage.lastError = err
+                    this.stage.errorTables.push(table)
+                    this.stage.status = stages.ERROR
+                    this.stage.lastSuccessRow = j - 1000
                 }
             }
         }
+        await this.connToDb.end()
     }
 
     async saveStage() {
-        await StagesImport.updateOne({hash: this.stage.hash}, this.stage).exec()
+        await StagesImport.updateOne({hash: this.stage.hash, created_at: this.stage.created_at}, this.stage).exec()
     }
 
     getInsertQuery(table, val) {
         const q =
-            `insert into ${table} (${Object.keys(val)}) values (${Object.values(val).map(v => typeof v == "string" ? `"${v}"` : v)});\n`
+            `insert into ${table} (${Object.keys(val)}) values (${Object.values(val).map(v => this.getValue(v))});`
         return q
+    }
+
+    getValue(value) {
+        if (typeof value == "string")
+            return `"${value}"`
+        if (value == null)
+            return 'NULL'
+        return value
     }
 }
 
