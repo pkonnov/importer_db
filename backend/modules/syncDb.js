@@ -110,7 +110,6 @@ class ImportState {
                 })
             })
         }
-        await this.runStage(stages.RUN_CREATE_ROWS)
     }
 
     async getTableStatements(listTableNames, conn) {
@@ -173,7 +172,6 @@ class ImportState {
                     console.log(`created count rows ${lenRows}`)
                     if (lenRows < 1000) {
                         this.stage.lastSuccessRow = 0
-                        this.stage.status = stages.FINISH
                         this.stage.createdTables.shift()
                         await this.saveStage()
                         console.log(`created rows end`)
@@ -190,6 +188,8 @@ class ImportState {
             }
         }
         await this.connToDb.end()
+        this.stage.status = stages.FINISH
+        await this.saveStage()
     }
 
     async saveStage() {
