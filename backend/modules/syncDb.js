@@ -79,9 +79,10 @@ class ImportState {
                     // throw new ConflictError(errors.ExcellentTableStruct)
                 }
             }
-            // not work
+
             await this.createTables(listTablesFromDb, listTablesToDb)
             await this.createRows()
+
         } catch (err) {
             console.log(err)
         }
@@ -93,11 +94,11 @@ class ImportState {
             tablesSuchNeedCreate = SetOperation.difference(listTablesFromDb, listTablesToDb)
             this.stage.tablesSuchNeedCreated.push(...tablesSuchNeedCreate)
         }
-        console.log(`start create tables: ${tablesSuchNeedCreate}`)
         if (tablesSuchNeedCreate || this.stage.tablesSuchNeedCreated) {
             const statements = await this.getTableStatements(
                 tablesSuchNeedCreate || this.stage.tablesSuchNeedCreated, this.connFromDb)
             statements.forEach((value, key, map) => {
+                console.log(tablesSuchNeedCreate || this.stage.tablesSuchNeedCreated, 'create tables')
                 this.connToDb.query(value).then(async (res) => {
                     this.stage.createdTables.push(key)
                     this.stage.tablesSuchNeedCreated.shift()
@@ -107,9 +108,11 @@ class ImportState {
                     this.stage.lastError = err
                     this.stage.status = stages.CREATE_TABLES_ERROR
                     await this.saveStage()
+                    return false;
                 })
             })
         }
+        return true
     }
 
     async getTableStatements(listTableNames, conn) {
@@ -151,8 +154,8 @@ class ImportState {
 
     async createRows() {
         await this.stage.nextStatus(stages.RUN_CREATE_ROWS)
-        console.log('run create rows')
-        for (const table of this.stage.createdTables) {
+        console.log('run create rows', Array.from(this.stage.tablesSuchNeedCreated))
+        for (const table of this.stage.tablesSuchNeedCreated) {
             console.log(`run create rows to ${table}`)
             const qCountRows = await this.connFromDb.query(`select count(*) from ${table};`)
             const countRows = qCountRows[0][0]["count(*)"]
@@ -161,13 +164,15 @@ class ImportState {
                 try {
                     const resRows = await this.connFromDb.query(`select * from ${table} limit 1000 offset ${j}`)
                     const rows = resRows[0]
-                    await this.connToDb.beginTransaction()
-                    const queries = []
-                    rows.forEach((value) => {
-                        queries.push(this.connToDb.query(this.getInsertQuery(table, value)))
-                    })
-                    await Promise.all(queries)
-                    await this.connToDb.commit()
+                    let query = `insert into ${table} (${Object.keys(rows[0])}) values `
+                    for (let jj = 0; jj < rows.length; jj++) {
+                        if (jj === rows.length - 1) {
+                            query += this.getInsertValues(table, rows[jj], ';')
+                            break
+                        }
+                        query += this.getInsertValues(table, rows[jj], ',')
+                    }
+                    await this.connToDb.query(query)
                     const lenRows = rows.length
                     console.log(`created count rows ${lenRows}`)
                     if (lenRows < 1000) {
@@ -178,7 +183,6 @@ class ImportState {
                     }
                 } catch (err) {
                     console.log(err)
-                    await this.connToDb.rollback()
                     await this.connToDb.end()
                     this.stage.lastError = err
                     this.stage.errorTables.push(table)
@@ -194,6 +198,10 @@ class ImportState {
 
     async saveStage() {
         await StagesImport.updateOne({hash: this.stage.hash, created_at: this.stage.created_at}, this.stage).exec()
+    }
+
+    getInsertValues(table, val, delimiter) {
+        return `(${Object.values(val).map(v => this.getValue(v))})${delimiter}`
     }
 
     getInsertQuery(table, val) {
